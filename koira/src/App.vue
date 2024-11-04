@@ -14,7 +14,6 @@ const cardRank = ref('');
 const cardSuit = ref('');
 const hands = ref<{ [key: string]: { rank: string, suit: string }[] } | null>(null);
 const playerCardCounts = ref<{ [key: string]: number }>({});
-const starter = ref('');
 
 onMounted(() => {
   socket.value = io('http://localhost:8080'); // Updated URL
@@ -45,26 +44,6 @@ onMounted(() => {
 
   socket.value.on('updateCardCounts', (cardCounts) => {
     playerCardCounts.value = cardCounts;
-  });
-
-  socket.value.on('cardPlayed', ({ player, card }) => {
-    messages.value.push(`${player} played ${card.rank} of ${card.suit}`);
-    if (hands.value && hands.value[player]) {
-      hands.value[player] = hands.value[player].filter(c => c.rank !== card.rank || c.suit !== card.suit);
-    }
-  });
-
-  socket.value.on('trickWon', ({ winner }) => {
-    messages.value.push(`${winner} won the trick`);
-  });
-
-  socket.value.on('starter', (player) => {
-    starter.value = player;
-    messages.value.push(`${player} starts the game`);
-  });
-
-  socket.value.on('error', (errorMessage) => {
-    messages.value.push(`Error: ${errorMessage}`);
   });
 
   socket.value.on('disconnect', () => {
@@ -105,18 +84,6 @@ const drawCards = () => {
     socket.value.emit('drawCards', lobbyId.value);
   }
 };
-
-const startGame = () => {
-  socket.value.emit('startGame', lobbyId.value);
-};
-
-const playCard = (card) => {
-  socket.value.emit('playCard', lobbyId.value, username.value, card);
-};
-
-const pickUpBottomCard = () => {
-  socket.value.emit('pickUpBottomCard', lobbyId.value, username.value);
-};
 </script>
 
 <template>
@@ -136,20 +103,7 @@ const pickUpBottomCard = () => {
       </div>
       <button @click="drawCards" class="btn w-full max-w-xs bg-red-500 text-white py-2 px-4 rounded-md shadow-md hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500">Draw Cards</button>
     </div>
-    <button @click="startGame" class="btn w-full max-w-xs mb-2 bg-purple-500 text-white py-2 px-4 rounded-md shadow-md hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500">Start Game</button>
-    <div v-if="hands && hands[username]">
-      <h2>Your Hand</h2>
-      <div v-for="card in hands[username]" :key="`${card.rank}-${card.suit}`">
-        <Card :rank="card.rank" :suit="card.suit" @click="playCard(card)" />
-      </div>
-    </div>
-    <button @click="pickUpBottomCard" class="btn w-full max-w-xs bg-orange-500 text-white py-2 px-4 rounded-md shadow-md hover:bg-orange-600 focus:outline-none focus:ring-2 focus:ring-orange-500">Pick Up Bottom Card</button>
-    <div>
-      <h2>Messages</h2>
-      <ul>
-        <li v-for="msg in messages" :key="msg">{{ msg }}</li>
-      </ul>
-    </div>
+    <div v-for="msg in messages" :key="msg" class="mt-4 p-2 bg-white rounded shadow-md">{{ msg }}</div>
     <div v-if="hands" class="mt-4">
       <div v-for="(hand, playerId) in hands" :key="playerId" class="mt-4">
         <h3 v-if="playerId === socketId" class="text-lg font-bold">Your Hand</h3>
