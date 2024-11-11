@@ -1,138 +1,104 @@
-const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
-const GameHandler = require('./game_handler');
-
+const socketIo = require('socket.io');
+const express = require('express');
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
+const GameHandler = require('./game_handler.js');
+const io = socketIo(server, {
   cors: {
-    origin: '*', // Allow all origins for simplicity, adjust as needed
-    methods: ['GET', 'POST']
+    origin: "http://127.0.0.1:5173", // Allow requests from this origin
+    methods: ["GET", "POST"]
   }
 });
 
 const PORT = 8080;
-const gameHandler = new GameHandler();
+const gameHandlers = {}; // Track the GameHandler for each lobby
 const lobbyUsers = {}; // Track the users in each lobby
-const socketUsernames = {}; // Track usernames associated with each socket
+const socketUsernames = {};
 
-app.get('/', (req, res) => {
-  res.send('WebSocket server is running');
-});
+function generateUniqueLobbyId() {
+  return Math.random().toString(36).substr(2, 9);
+}
 
 io.on('connection', (socket) => {
   console.log('a user connected');
 
-  // Handle joining a lobby
-  socket.on('joinLobby', (lobbyId, username) => {
-    socket.join(lobbyId);
+  socket.on('createLobby', (username) => {
+    const lobbyId = generateUniqueLobbyId();
+    lobbyUsers[lobbyId] = [username];
+    gameHandlers[lobbyId] = new GameHandler();
     socketUsernames[socket.id] = username;
-    console.log(`User ${username} joined lobby: ${lobbyId}`);
-
-    if (!lobbyUsers[lobbyId]) {
-      lobbyUsers[lobbyId] = [];
-    }
-    lobbyUsers[lobbyId].push(socket.id);
-    console.log(`Number of users in lobby ${lobbyId}: ${lobbyUsers[lobbyId].length}`);
-
-    socket.to(lobbyId).emit('message', `${username} has joined the lobby: ${lobbyId}`);
+    socket.join(lobbyId);
+    socket.emit('lobbyCreated', { lobbyId, username });
+    io.to(lobbyId).emit('updateLobby', { lobbyId, users: lobbyUsers[lobbyId] });
+    console.log(`Lobby ${lobbyId} created by ${username}`);
   });
 
-  // Handle leaving a lobby
-  socket.on('leaveLobby', (lobbyId) => {
-    const username = socketUsernames[socket.id];
-    socket.leave(lobbyId);
-    console.log(`User ${username} left lobby: ${lobbyId}`);
-
+  socket.on('joinLobby', (lobbyId, username) => {
+    console.log(`Attempting to join lobby with ID: ${lobbyId} and username: ${username}`);
     if (lobbyUsers[lobbyId]) {
-      lobbyUsers[lobbyId] = lobbyUsers[lobbyId].filter(id => id !== socket.id);
-      console.log(`Number of users in lobby ${lobbyId}: ${lobbyUsers[lobbyId].length}`);
+      // Check if the username is already taken by another user
+      if (lobbyUsers[lobbyId].includes(username) && socketUsernames[socket.id] !== username) {
+        socket.emit('error', 'Username already taken or invalid');
+        return;
+      }
+      // Add the user to the lobby if they are not already in it
+      if (!lobbyUsers[lobbyId].includes(username)) {
+        lobbyUsers[lobbyId].push(username);
+      }
+      socketUsernames[socket.id] = username;
+      socket.join(lobbyId);
+      socket.emit('lobbyJoined', { lobbyId, username });
+      io.emit('updateLobby', { lobbyId, users: lobbyUsers[lobbyId] });
+      console.log(`${username} joined lobby ${lobbyId}`);
+    } else {
+      console.error(`Lobby with ID ${lobbyId} does not exist`);
+      socket.emit('error', 'Lobby does not exist');
+    }
+  });
 
+  socket.on('startGame', (lobbyId) => {
+    if (gameHandlers[lobbyId]) {
+      gameHandlers[lobbyId].start(lobbyId, lobbyUsers[lobbyId]);
+      io.to(lobbyId).emit('gameStarted', { lobbyId });
+      console.log(`Game started in lobby ${lobbyId}`);
+    } else {
+      socket.emit('error', 'Lobby does not exist or game handler not found');
+    }
+  });
+
+  socket.on('leaveLobby', (lobbyId, username) => {
+    if (lobbyUsers[lobbyId]) {
+      lobbyUsers[lobbyId] = lobbyUsers[lobbyId].filter(user => user !== username);
+      socket.leave(lobbyId);
+      socket.emit('lobbyLeft', { lobbyId, username });
+      io.to(lobbyId).emit('updateLobby', { lobbyId, users: lobbyUsers[lobbyId] });
+      // Check if the lobby is empty
       if (lobbyUsers[lobbyId].length === 0) {
         delete lobbyUsers[lobbyId];
-        gameHandler.clearLobby(lobbyId);
-        console.log(`Cleared state for lobby ${lobbyId}`);
+        delete gameHandlers[lobbyId];
+        console.log(`Lobby ${lobbyId} has been removed as it is empty`);
       }
-    }
 
-    socket.to(lobbyId).emit('message', `${username} has left the lobby: ${lobbyId}`);
-    delete socketUsernames[socket.id];
-  });
-
-  // Handle sending a message to a lobby
-  socket.on('sendMessage', (lobbyId, message) => {
-    const username = socketUsernames[socket.id];
-    console.log(`Message from ${username} to lobby ${lobbyId}: ${message}`);
-    io.in(lobbyId).emit('message', `${username}: ${message}`);
-  });
-
-  // Handle sending a card to a lobby
-  socket.on('sendCard', (lobbyId, card) => {
-    const username = socketUsernames[socket.id];
-    console.log(`Sending card from ${username} to lobby ${lobbyId}:`, card);
-    io.in(lobbyId).emit('card', card);
-  });
-
-  // Handle drawing cards for players
-  socket.on('drawCards', (lobbyId) => {
-    try {
-      const players = lobbyUsers[lobbyId];
-      if (!Array.isArray(players)) {
-        throw new Error('Players is not an array');
-      }
-  
-      const cardsPerPlayer = 3; // Draw 3 cards for each player
-      const hands = gameHandler.drawCards(players, cardsPerPlayer);
-      console.log(`Drawing cards for players in lobby ${lobbyId}:`, hands);
-  
-      // Create an object to store the card counts and usernames for each player
-      const cardCounts = {};
-  
-      for (const player of players) {
-        const playerSocket = io.sockets.sockets.get(player);
-        if (playerSocket) {
-          const username = socketUsernames[player];
-          playerSocket.emit('hand', hands[player]);
-          cardCounts[username] = hands[player].length;
-        }
-      }
-  
-      // Emit the card counts to all players in the lobby
-      io.in(lobbyId).emit('updateCardCounts', cardCounts);
-    } catch (error) {
-      console.error('Error drawing cards:', error.message);
-      socket.emit('error', error.message);
-    }
-  });
-
-  // Handle getting hands of players
-  socket.on('getHands', (lobbyId) => {
-    const hands = gameHandler.getHands();
-    const playerSocket = io.sockets.sockets.get(socket.id);
-    if (playerSocket) {
-      playerSocket.emit('hand', hands[socket.id]);
+      console.log(`${username} left lobby ${lobbyId}`);
+    } else {
+      socket.emit('error', 'Lobby does not exist');
     }
   });
 
   socket.on('disconnect', () => {
+    console.log('a user disconnected');
     const username = socketUsernames[socket.id];
-    console.log(`User ${username} disconnected`);
-    for (const lobbyId in lobbyUsers) {
-      if (lobbyUsers.hasOwnProperty(lobbyId)) {
-        if (lobbyUsers[lobbyId].includes(socket.id)) {
-          lobbyUsers[lobbyId] = lobbyUsers[lobbyId].filter(id => id !== socket.id);
-          console.log(`Number of users in lobby ${lobbyId}: ${lobbyUsers[lobbyId].length}`);
+    if (username) {
+      for (const lobbyId in lobbyUsers) {
+        if (lobbyUsers[lobbyId].includes(username)) {
 
-          if (lobbyUsers[lobbyId].length === 0) {
-            delete lobbyUsers[lobbyId];
-            gameHandler.clearLobby(lobbyId);
-            console.log(`Cleared state for lobby ${lobbyId}`);
-          }
+          socket.emit('leaveLobby', lobbyId, username);
+          io.to(lobbyId).emit('updateLobby', { lobbyId, users: lobbyUsers[lobbyId] });
         }
       }
+      delete socketUsernames[socket.id];
     }
-    delete socketUsernames[socket.id];
   });
 });
 
